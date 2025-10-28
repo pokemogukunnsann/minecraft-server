@@ -88,5 +88,17 @@ def handle_pack():
             return jsonify({"error": f"予期せぬサーバーエラーが発生しました: {str(e)}"}), 500
 
 # サーバー起動コマンド (開発用)
-# if __name__ == '__main__'
-app.run(debug=True, host='0.0.0.0', port=5000);
+# ... (handle_pack関数の終了) ...
+
+# サーバー起動コマンド
+if __name__ == '__main__':
+    # Renderのようなデプロイ環境でPORT環境変数を使う場合に対応
+    port = int(os.environ.get("PORT", 5000))
+    # 外部からのアクセスを許可するため host='0.0.0.0' を指定
+    app.run(debug=True, host='0.0.0.0', port=port) 
+
+# --- 以前のコードの誤りがあった部分（修正後） ---
+# 修正前は以下のようにインデントが不適切だった可能性があります:
+# if __name__ == '__main__':
+# # app.run(debug=True, host='0.0.0.0', port=5000)
+#     app.run(debug=True, host='0.0.0.0', port=5000) # <- このインデントがズレていた
