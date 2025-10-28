@@ -20,9 +20,82 @@ from ai import format_ai_behaviors # mobs.pyにマージされることを想定
 from textures import format_rp_entity_texture, format_rp_block_texture
 from geometry import format_rp_custom_geometry
 from environment import format_world_render_settings, format_world_generation_parameters
+from structure import process_structure_data
 
 print("All_Data_Formatters_Imported")
 
+
+    # ----------------------------------------------------
+    # 9. 構造物データ (BP) の処理 (NBTバイナリ)
+    # ----------------------------------------------------
+    if 'structures' in client_input:
+        for struct_name, struct_data in client_input['structures'].items():
+            # クライアントは編集後のJSONを送信し、サーバーがNBTバイナリに変換
+            nbt_for_upload, error = process_structure_data(struct_name, struct_data, action='to_nbt')
+            
+            if nbt_for_upload:
+                # process_structure_dataが返す形式: 
+                # {"path": "...", "content_base64": "...", "is_binary": True}
+                
+                # NBTバイナリは既にBase64エンコードされているため、そのまま追加
+                commit_files.append({
+                    "path": nbt_for_upload["path"],
+                    "content": nbt_for_upload["content_base64"], # Base64エンコード済み文字列
+                    "is_binary": True # バイナリフラグを立てる
+                })
+                print(f"Processed_Structure:{struct_name}_As_Binary")
+            
+    return commit_files
+
+
+# --- GitHub APIへのコミット実行関数（バイナリ対応修正） ---
+
+def unified_commit_to_github(commit_files: list, commit_message: str, branch: str = "main"):
+    """
+    複数のファイルを一つのコミットとしてGitHubにプッシュする。（バイナリ対応）
+    """
+    
+    success_count = 0
+    
+    for file_data in commit_files:
+        path = file_data['path']
+        content = file_data['content']
+        is_binary = file_data.get('is_binary', False) # 新しいバイナリフラグ
+        
+        # 1. コンテンツのエンコード処理の分岐
+        if is_binary:
+            # NBTバイナリ（mcstructure）: structure.pyですでにBase64エンコード済み
+            content_encoded = content
+            print(f"Content_Type:Binary_{path}")
+        else:
+            # JSON/LANGファイル: 文字列をBase64エンコード
+            content_bytes = content.encode('utf-8')
+            content_encoded = base64.b64encode(content_bytes).decode('utf-8')
+            print(f"Content_Type:Text/JSON_{path}")
+
+        # 2. 既存ファイルのSHAを取得
+        sha = get_sha_of_file(path)
+        
+        # 3. ペイロードの構築とコミットの実行 (変更なし)
+        payload = {
+            "message": commit_message,
+            "content": content_encoded,
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha 
+            
+        url = f"{GITHUB_API_URL}/{path}"
+        response = requests.put(url, headers=get_headers(), data=json.dumps(payload, ensure_ascii=False))
+
+        if response.status_code in [200, 201]:
+            print(f"File_Commit_Success:{path}")
+            success_count += 1
+        else:
+            print(f"File_Commit_Error:{path}_{response.status_code}_{response.text[:100]}...")
+            
+    return success_count == len(commit_files)
+    
 # --- 共通のヘッダー関数（変更なし） ---
 def get_headers():
     headers = {
