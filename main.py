@@ -88,5 +88,5 @@ def handle_pack():
             return jsonify({"error": f"予期せぬサーバーエラーが発生しました: {str(e)}"}), 500
 
 # サーバー起動コマンド (開発用)
- if __name__ == '__main__'
+# if __name__ == '__main__'
   app.run(debug=True, host='0.0.0.0', port=5000)
