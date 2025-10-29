@@ -1,82 +1,163 @@
-import os
 import requests
-import json
 import base64
+import json
+import os
+# --- 修正点: 必要な整形モジュールを全てインポート ---
+# NOTE: 実際にはこれらのファイルに適切な整形関数が定義されている必要があります。
+# 今回は関数が存在すると仮定します。
+from mobs import format_mob_data_for_bp 
+from items import format_item_data_for_bp
+from blocks import format_block_data_for_bp
+from structure import process_structure_data 
+from lang import format_lang_data_for_rp
 
-# --- 環境変数からGitHub認証情報を取得 ---
-# NOTE: 実際の運用では、環境変数やシークレットストアに保存します
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "YOUR_SECRET_TOKEN") 
-REPO_OWNER = "kakaomames"
-REPO_NAME = "minecraft-data"
-GITHUB_API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents"
-print(f"REPO_NAME:{REPO_NAME}")
+# --- 定数設定 ---
+GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "kakaomame") 
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "minecraft-data")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
-# --- 他のモジュールからのインポート (整形ロジックを呼び出す場合) ---
-from mobs import validate_and_format_mob_data
-from item import validate_and_format_item_data
-from lang import validate_and_format_lang_data
-from block import validate_and_format_block_data
-from ai import format_ai_behaviors # mobs.pyにマージされることを想定
-from textures import format_rp_entity_texture, format_rp_block_texture
-from geometry import format_rp_custom_geometry
-from environment import format_world_render_settings, format_world_generation_parameters
-from structure import process_structure_data
+if not GITHUB_TOKEN:
+    print("WARNING: GITHUB_TOKEN environment variable is not set. Commit functionality will fail.")
+else:
+    print("GITHUB_TOKEN_Found")
 
-print("All_Data_Formatters_Imported")
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents"
+print(f"GITHUB_API_URL:{GITHUB_API_URL}")
 
+
+def get_headers():
+    """GitHub APIリクエストに必要なヘッダーを生成する。"""
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    return headers
+
+
+def get_sha_of_file(path: str):
+    """GitHub上の既存ファイルのSHA (バージョン識別子) を取得する。"""
+    url = f"{GITHUB_API_URL}/{path}"
+    response = requests.get(url, headers=get_headers())
+    
+    if response.status_code == 200:
+        sha = response.json().get("sha")
+        print(f"SHA_Found_for:{path}_SHA:{sha}")
+        return sha
+    else:
+        if response.status_code != 404:
+            print(f"Error_Fetching_SHA_for:{path}_Status:{response.status_code}")
+        return None
+
+
+def prepare_files_for_commit(client_input: dict) -> list:
+    """
+    クライアントからの整形済みデータを受け取り、GitHub APIにコミットするための
+    ファイルリスト（パスとコンテンツ）を生成する。
+    """
+    
+    commit_files = [] 
+    
+    # JSON化処理の共通関数 (バックスラッシュを維持するカスタム処理はjson.dumpsのensure_ascii=Falseで対応)
+    def add_json_file(top_key, sub_folder, format_func):
+        if top_key in client_input:
+            for name, data in client_input[top_key].items():
+                # データを整形関数に渡して最終的なJSONデータを得る
+                final_json_data = format_func(name, data) 
+                
+                path = f"BP/{sub_folder}/{name}.json" 
+                
+                # NOTE: ユーザー設定により、バックスラッシュはそのまま維持（ensure_ascii=False）
+                commit_files.append({
+                    "path": path,
+                    "content": json.dumps(final_json_data, indent=4, ensure_ascii=False),
+                    "is_binary": False
+                })
+                print(f"Prepared_JSON_File:{path}")
+    
+    
+    # 1. マニフェストファイルの処理 (特殊ケース)
+    if 'manifest' in client_input:
+        for pack_type, content in client_input['manifest'].items():
+            path = f"{pack_type}/manifest.json" 
+            commit_files.append({
+                "path": path,
+                "content": json.dumps(content, indent=4, ensure_ascii=False),
+                "is_binary": False
+            })
+            print(f"Prepared_Manifest:{path}")
+
+    # 2. .langファイルの処理 (特殊ケース - JSONではない)
+    if 'lang' in client_input:
+        for lang_code, data in client_input['lang'].items():
+            # lang.pyの整形関数を呼び出し、テキストコンテンツを得る
+            final_lang_content = format_lang_data_for_rp(lang_code, data)
+            
+            path = f"RP/texts/{lang_code}.lang" 
+            commit_files.append({
+                "path": path,
+                "content": final_lang_content, # .langファイルはJSONではない
+                "is_binary": False
+            })
+            print(f"Prepared_Lang:{path}")
+            
+    # 3. モブデータの処理
+    add_json_file('mobs', 'entities', format_mob_data_for_bp)
+            
+    # 4. アイテムデータの処理
+    add_json_file('items', 'items', format_item_data_for_bp)
+    
+    # 5. ブロックデータの処理
+    add_json_file('blocks', 'blocks', format_block_data_for_bp)
 
     # ----------------------------------------------------
-    # 9. 構造物データ (BP) の処理 (NBTバイナリ)
+    # 6. 構造物データ (BP) の処理 (NBTバイナリ)
     # ----------------------------------------------------
     if 'structures' in client_input:
         for struct_name, struct_data in client_input['structures'].items():
-            # クライアントは編集後のJSONを送信し、サーバーがNBTバイナリに変換
+            # structure.py を呼び出し、NBTバイナリ（Base64エンコード済み）を取得
             nbt_for_upload, error = process_structure_data(struct_name, struct_data, action='to_nbt')
             
-            if nbt_for_upload:
-                # process_structure_dataが返す形式: 
-                # {"path": "...", "content_base64": "...", "is_binary": True}
-                
-                # NBTバイナリは既にBase64エンコードされているため、そのまま追加
+            if nbt_for_upload and 'content_base64' in nbt_for_upload:
+                # NBTバイナリはすでにBase64エンコード済み
                 commit_files.append({
                     "path": nbt_for_upload["path"],
-                    "content": nbt_for_upload["content_base64"], # Base64エンコード済み文字列
-                    "is_binary": True # バイナリフラグを立てる
+                    "content": nbt_for_upload["content_base64"], 
+                    "is_binary": True 
                 })
-                print(f"Processed_Structure:{struct_name}_As_Binary")
+                print(f"Prepared_Structure:{struct_name}_As_Binary")
+            elif error:
+                print(f"Structure_Conversion_Error_for:{struct_name}_{error}")
             
     return commit_files
 
-
-# --- GitHub APIへのコミット実行関数（バイナリ対応修正） ---
 
 def unified_commit_to_github(commit_files: list, commit_message: str, branch: str = "main"):
     """
     複数のファイルを一つのコミットとしてGitHubにプッシュする。（バイナリ対応）
     """
     
+    # ... (GitHubコミットロジックは変更なし。以前のコードと同一です。) ...
+    if not GITHUB_TOKEN:
+        print("Commit_Failed: GITHUB_TOKEN is missing.")
+        return False
+        
     success_count = 0
     
     for file_data in commit_files:
         path = file_data['path']
         content = file_data['content']
-        is_binary = file_data.get('is_binary', False) # 新しいバイナリフラグ
+        is_binary = file_data.get('is_binary', False) 
         
-        # 1. コンテンツのエンコード処理の分岐
         if is_binary:
-            # NBTバイナリ（mcstructure）: structure.pyですでにBase64エンコード済み
             content_encoded = content
             print(f"Content_Type:Binary_{path}")
         else:
-            # JSON/LANGファイル: 文字列をBase64エンコード
             content_bytes = content.encode('utf-8')
             content_encoded = base64.b64encode(content_bytes).decode('utf-8')
             print(f"Content_Type:Text/JSON_{path}")
 
-        # 2. 既存ファイルのSHAを取得
         sha = get_sha_of_file(path)
         
-        # 3. ペイロードの構築とコミットの実行 (変更なし)
         payload = {
             "message": commit_message,
             "content": content_encoded,
@@ -92,179 +173,16 @@ def unified_commit_to_github(commit_files: list, commit_message: str, branch: st
             print(f"File_Commit_Success:{path}")
             success_count += 1
         else:
-            print(f"File_Commit_Error:{path}_{response.status_code}_{response.text[:100]}...")
+            print(f"File_Commit_Error:{path}_Status:{response.status_code}_Response:{response.text[:100]}...")
             
     return success_count == len(commit_files)
+
+# --- 実行例 (コメントアウト) ---
+# if __name__ == '__main__':
+#     # 実際には main.py から渡される
+#     test_client_data = {
+#         # ... テストデータ ...
+#     }
     
-# --- 共通のヘッダー関数（変更なし） ---
-def get_headers():
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json"
-    }
-    return headers
-
-# --- 修正・追加関数：単一ファイルコミット（再利用のため残す） ---
-# ... (get_sha_of_file関数、upload_file_to_github関数は残す) ...
-
-# --- 新規統合関数：全てのデータを処理し、コミットリストを作成する ---
-
-def prepare_files_for_commit(client_input: dict):
-    """
-    クライアントからの全データを受け取り、GitHubコミット用のファイルリストを生成する。
-    
-    Args:
-        client_input (dict): クライアントから送信された全てのカスタムデータ
-        
-    Returns:
-        list: コミットするファイルのリスト [{'path': '...', 'content': '...', 'encoding': 'base64', 'sha': '...'}, ...]
-    """
-    commit_files = []
-    
-    # ----------------------------------------------------
-    # 1. モブデータ (BP & RP) の処理
-    # ----------------------------------------------------
-    if 'mobs' in client_input:
-        for mob_name, mob_data in client_input['mobs'].items():
-            
-            # BP: モブの振る舞い (entity/mob_name.json)
-            # AIデータをmobs.pyに統合してBP JSONを生成
-            bp_content = validate_and_format_mob_data(mob_name, mob_data)
-            
-            # RP: モブの見た目 (models/entity/geometry.mob_name.json と client_entity/mob_name.json)
-            if 'texture_info' in mob_data:
-                # RP Entity JSON
-                rp_content = format_rp_entity_texture(mob_name, **mob_data['texture_info']['rp_entity'])
-                
-                # Geometry JSON
-                geometry_content = format_rp_custom_geometry(mob_name, **mob_data['texture_info']['geometry'])
-
-                # ファイルリストに追加
-                # RP Entity JSON
-                commit_files.append({
-                    "path": f"RP/entity/{mob_name}.json",
-                    "content": json.dumps(rp_content, indent=2, ensure_ascii=False)
-                })
-                # Geometry JSON
-                commit_files.append({
-                    "path": f"RP/models/entity/geometry.{mob_name}.json",
-                    "content": json.dumps(geometry_content, indent=2, ensure_ascii=False)
-                })
-
-            # BP Entity JSON (最後にエンコードして追加)
-            commit_files.append({
-                "path": f"BP/entity/{mob_name}.json",
-                "content": json.dumps(bp_content, indent=2, ensure_ascii=False)
-            })
-            print(f"Processed_Mob:{mob_name}")
-
-    # ----------------------------------------------------
-    # 2. 言語データ (RP) の処理
-    # ----------------------------------------------------
-    if 'lang' in client_input:
-        lang_data, error = validate_and_format_lang_data(client_input['lang'])
-        if lang_data:
-            commit_files.append({
-                "path": f"RP/texts/ja_JP.lang", # ja_JPファイルに固定して追加
-                "content": lang_data
-            })
-            print("Processed_Lang_File")
-
-    # ----------------------------------------------------
-    # 3. マニフェストファイルの処理
-    # ----------------------------------------------------
-    # マニフェストはRPとBPの両方に必要
-    if 'manifest' in client_input:
-        # BP Manifest
-        bp_manifest = client_input['manifest'].get('BP')
-        if bp_manifest:
-            # manifest.pyの関数で最終整形することを想定
-            bp_manifest_content = json.dumps(bp_manifest, indent=2, ensure_ascii=False)
-            commit_files.append({"path": "BP/manifest.json", "content": bp_manifest_content})
-            print("Processed_BP_Manifest")
-            
-        # RP Manifest
-        rp_manifest = client_input['manifest'].get('RP')
-        if rp_manifest:
-            rp_manifest_content = json.dumps(rp_manifest, indent=2, ensure_ascii=False)
-            commit_files.append({"path": "RP/manifest.json", "content": rp_manifest_content})
-            print("Processed_RP_Manifest")
-
-    # (アイテム、ブロック、環境データなども同様に処理を続ける)
-    
-    return commit_files
-
-
-# --- GitHub APIへのコミット実行関数（新規/要修正） ---
-
-def unified_commit_to_github(commit_files: list, commit_message: str, branch: str = "main"):
-    """
-    複数のファイルを一つのコミットとしてGitHubにプッシュする。
-    
-    NOTE: GitHubのContents APIは1ファイルずつしか処理できないため、
-          ここではGit Data API (Tree, Commit) を使用する、より高度な方法が必要です。
-          しかし、シンプルな実装として、ここではContents APIのputリクエストをファイル数分繰り返します。
-    """
-    
-    success_count = 0
-    
-    for file_data in commit_files:
-        path = file_data['path']
-        content = file_data['content']
-        
-        # Base64エンコード
-        content_bytes = content.encode('utf-8')
-        content_encoded = base64.b64encode(content_bytes).decode('utf-8')
-        
-        # 既存ファイルのSHAを取得
-        sha = get_sha_of_file(path)
-        
-        payload = {
-            "message": commit_message,
-            "content": content_encoded,
-            "branch": branch,
-        }
-        if sha:
-            payload["sha"] = sha 
-            
-        url = f"{GITHUB_API_URL}/{path}"
-        response = requests.put(url, headers=get_headers(), data=json.dumps(payload, ensure_ascii=False))
-
-        if response.status_code in [200, 201]:
-            print(f"File_Commit_Success:{path}")
-            success_count += 1
-        else:
-            print(f"File_Commit_Error:{path}_{response.status_code}_{response.text[:100]}...")
-            
-    return success_count == len(commit_files) # 全てのファイルが成功したかどうか
-
-# --- 実行例 (仮のデータを使用) ---
-# NOTE: 実際に実行するには有効な GITHUB_TOKEN が必要です。
-"""
-# サーバーAPIに送られてきたデータ全体を想定
-full_client_data = {
-    "manifest": {
-        "BP": {"format_version": 2, "header": {"name": "BP", ...}, "modules": [...]},
-        "RP": {"format_version": 2, "header": {"name": "RP", ...}, "modules": [...]},
-    },
-    "mobs": {
-        "super_sheep": {
-            "hp": 12, "speed": 0.4, "families": ["sheep", "animal"],
-            "texture_info": {
-                "rp_entity": {"texture_path": "...", "model_id": "geometry.super_sheep"},
-                "geometry": {"texture_width": 64, "texture_height": 64, "bone_data": []}
-            }
-        }
-    },
-    "lang": {
-        "item.custom:super_sword": "超絶すごい剣！"
-    }
-}
-
-files_to_commit = prepare_files_for_commit(full_client_data)
-print(f"Total_Files_Prepared:{len(files_to_commit)}")
-
-# コミット実行（コメントアウト）
-# unified_commit_to_github(files_to_commit, "feat: Initial custom pack upload")
-"""
+#     # files = prepare_files_for_commit(test_client_data)
+#     # unified_commit_to_github(files, "Test Commit from Python Server")
