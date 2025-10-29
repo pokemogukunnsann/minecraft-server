@@ -3,17 +3,20 @@ import base64
 import json
 import os
 # --- 修正点: 必要な整形モジュールを全てインポート ---
-# NOTE: 実際にはこれらのファイルに適切な整形関数が定義されている必要があります。
-# 今回は関数が存在すると仮定します。
+# BP (Behavior Pack) 関連
 from mobs import format_mob_data_for_bp 
 from items import format_item_data_for_bp
 from blocks import format_block_data_for_bp
 from structure import process_structure_data 
+
+# RP (Resource Pack) 関連
 from lang import format_lang_data_for_rp
+from geometry import format_geometry_data_for_rp # RPのモデル定義
+from textures import format_texture_data_for_rp # テクスチャパス/定義関連
 
 # --- 定数設定 ---
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "kakaomame") 
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "minecraft-data")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "minecraft-addon-repository")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 if not GITHUB_TOKEN:
@@ -57,16 +60,16 @@ def prepare_files_for_commit(client_input: dict) -> list:
     
     commit_files = [] 
     
-    # JSON化処理の共通関数 (バックスラッシュを維持するカスタム処理はjson.dumpsのensure_ascii=Falseで対応)
-    def add_json_file(top_key, sub_folder, format_func):
+    # 共通関数: JSONファイルを BP/RP の適切なフォルダに追加
+    # pack_type: 'BP' or 'RP'
+    def add_json_file(top_key, pack_type, sub_folder, format_func):
         if top_key in client_input:
             for name, data in client_input[top_key].items():
-                # データを整形関数に渡して最終的なJSONデータを得る
                 final_json_data = format_func(name, data) 
                 
-                path = f"BP/{sub_folder}/{name}.json" 
+                # RPの場合はファイル名が*.json、BPの場合は*.json
+                path = f"{pack_type}/{sub_folder}/{name}.json" 
                 
-                # NOTE: ユーザー設定により、バックスラッシュはそのまま維持（ensure_ascii=False）
                 commit_files.append({
                     "path": path,
                     "content": json.dumps(final_json_data, indent=4, ensure_ascii=False),
@@ -75,10 +78,10 @@ def prepare_files_for_commit(client_input: dict) -> list:
                 print(f"Prepared_JSON_File:{path}")
     
     
-    # 1. マニフェストファイルの処理 (特殊ケース)
+    # 1. マニフェストファイルの処理
     if 'manifest' in client_input:
         for pack_type, content in client_input['manifest'].items():
-            path = f"{pack_type}/manifest.json" 
+            path = f"{pack_type}/manifest.json"
             commit_files.append({
                 "path": path,
                 "content": json.dumps(content, indent=4, ensure_ascii=False),
@@ -86,39 +89,34 @@ def prepare_files_for_commit(client_input: dict) -> list:
             })
             print(f"Prepared_Manifest:{path}")
 
-    # 2. .langファイルの処理 (特殊ケース - JSONではない)
+    # 2. .langファイルの処理
     if 'lang' in client_input:
         for lang_code, data in client_input['lang'].items():
-            # lang.pyの整形関数を呼び出し、テキストコンテンツを得る
             final_lang_content = format_lang_data_for_rp(lang_code, data)
             
             path = f"RP/texts/{lang_code}.lang" 
             commit_files.append({
                 "path": path,
-                "content": final_lang_content, # .langファイルはJSONではない
+                "content": final_lang_content,
                 "is_binary": False
             })
             print(f"Prepared_Lang:{path}")
             
-    # 3. モブデータの処理
-    add_json_file('mobs', 'entities', format_mob_data_for_bp)
-            
-    # 4. アイテムデータの処理
-    add_json_file('items', 'items', format_item_data_for_bp)
-    
-    # 5. ブロックデータの処理
-    add_json_file('blocks', 'blocks', format_block_data_for_bp)
+    # --- BP データの処理 ---
+    add_json_file('mobs', 'BP', 'entities', format_mob_data_for_bp)
+    add_json_file('items', 'BP', 'items', format_item_data_for_bp)
+    add_json_file('blocks', 'BP', 'blocks', format_block_data_for_bp)
 
-    # ----------------------------------------------------
-    # 6. 構造物データ (BP) の処理 (NBTバイナリ)
-    # ----------------------------------------------------
+    # --- RP データの処理 ---
+    add_json_file('geometry', 'RP', 'models/entity', format_geometry_data_for_rp) # RPジオメトリ
+    add_json_file('textures', 'RP', 'textures/entity', format_texture_data_for_rp) # RPテクスチャ定義（JSONの場合）
+
+    # 6. 構造物データ (NBTバイナリ) の処理
     if 'structures' in client_input:
         for struct_name, struct_data in client_input['structures'].items():
-            # structure.py を呼び出し、NBTバイナリ（Base64エンコード済み）を取得
             nbt_for_upload, error = process_structure_data(struct_name, struct_data, action='to_nbt')
             
             if nbt_for_upload and 'content_base64' in nbt_for_upload:
-                # NBTバイナリはすでにBase64エンコード済み
                 commit_files.append({
                     "path": nbt_for_upload["path"],
                     "content": nbt_for_upload["content_base64"], 
@@ -136,7 +134,6 @@ def unified_commit_to_github(commit_files: list, commit_message: str, branch: st
     複数のファイルを一つのコミットとしてGitHubにプッシュする。（バイナリ対応）
     """
     
-    # ... (GitHubコミットロジックは変更なし。以前のコードと同一です。) ...
     if not GITHUB_TOKEN:
         print("Commit_Failed: GITHUB_TOKEN is missing.")
         return False
@@ -148,6 +145,7 @@ def unified_commit_to_github(commit_files: list, commit_message: str, branch: st
         content = file_data['content']
         is_binary = file_data.get('is_binary', False) 
         
+        # ... (エンコードとコミットロジックは変更なし) ...
         if is_binary:
             content_encoded = content
             print(f"Content_Type:Binary_{path}")
@@ -176,13 +174,3 @@ def unified_commit_to_github(commit_files: list, commit_message: str, branch: st
             print(f"File_Commit_Error:{path}_Status:{response.status_code}_Response:{response.text[:100]}...")
             
     return success_count == len(commit_files)
-
-# --- 実行例 (コメントアウト) ---
-# if __name__ == '__main__':
-#     # 実際には main.py から渡される
-#     test_client_data = {
-#         # ... テストデータ ...
-#     }
-    
-#     # files = prepare_files_for_commit(test_client_data)
-#     # unified_commit_to_github(files, "Test Commit from Python Server")
